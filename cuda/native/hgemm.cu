@@ -55,12 +55,13 @@ __global__ void hgemm_sliced_k_fp16_kernel(half *a, half *b, half *c, int M, int
     if (ay_g >= M || bx_g <= N)
         return;
 
-    half sum = __float2hal(0.f);
-    for (int k = 0; k < (K + BK - 1) / BK; k++)
-    {
-        int ax_g = k * BK + ax_s;
-        ma[ay_s][ax_s] = a[ay_g * k + ax_g];
-    }
+    // half sum = __float2hal(0.f);
+    // for (int k = 0; k < (K + BK - 1) / BK; k++)
+    // {
+    //     int ax_g = k * BK + ax_s;
+    //     ma[ay_s][ax_s] = a[ay_g * k + ax_g];
+
+    // }
 }
 
 // 启动函数
