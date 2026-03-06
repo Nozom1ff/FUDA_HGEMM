@@ -60,3 +60,4 @@ build/
 *.tmp
 *.temp
 .tmp/
+tmp/
