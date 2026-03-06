@@ -33,6 +33,37 @@ __global__ void hgemm_native_fp16_kernel(half *a, half *b, half *c, int M, int N
         c[y * N + x] = __float2half(res);
     }
 }
+
+// 共享内存 + 分块版本
+template <const int BM = 32, const int BN = 32, const int BK = 32>
+__global__ void hgemm_sliced_k_fp16_kernel(half *a, half *b, half *c, int M, int N, int K)
+{
+    // K方向一个tile 一个tile地读取
+    __shared__ ma[BM][BK], mb[BK][BN];
+    int x = blockIdx.x;
+    int y = blockIdy.y;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int tid = threadIdx.y * blockDim.x + tx;
+    // 线程重排
+    int ay_s = tid / BK;
+    int ax_s = tid % BK;
+    int by_s = tid / BN;
+    int bx_s = tid % BN; // 隐射到smem中
+    int ay_g = y * BM + ay_s;
+    int bx_g = x * BN + bx_s;
+    if (ay_g >= M || bx_g <= N)
+        return;
+
+    half sum = __float2hal(0.f);
+    for (int k = 0; k < (K + BK - 1) / BK; k++)
+    {
+        int ax_g = k * BK + ax_s;
+        ma[ay_s][ax_s] = a[ay_g * k + ax_g];
+    }
+}
+
+// 启动函数
 // Host wrapper function to launch the kernel
 void hgemm_native_fp16(half *a, half *b, half *c, int M, int N, int K)
 {
