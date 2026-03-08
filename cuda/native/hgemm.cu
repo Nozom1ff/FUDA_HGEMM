@@ -213,10 +213,10 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_kernel(half *a, half *b, half *c, int
     __shared__ half s_a[BM][BK], s_b[BK][BN]; // 2*128*8*2=4KB
 
     // 每行八个数据 两个线程处理 一个线程读4个
-    int sam = tid / 2;           // 0-127, which row in A to load
+    int sam = tid / 2;                // 0-127, which row in A to load
     int sak = (tid % 2 == 0) ? 0 : 4; // 向量化访存, 0 or 4
-    int sbk = tid / 32;          // 0-7, which row in B to load
-    int sbn = (tid % 32) * 4;    // 0, 4, 8, ..., 124, which col in B to load
+    int sbk = tid / 32;               // 0-7, which row in B to load
+    int sbn = (tid % 32) * 4;         // 0, 4, 8, ..., 124, which col in B to load
 
     int gam = by * BM + sam;
     int gbn = bx * BN + sbn;
@@ -308,11 +308,11 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_kernel(half *a, half *b, half *c, int
         if (r < M)
         {
 #pragma unroll
-            for (int n = 0; n < TN; ++n)
+            for (int n = 0; n < TN; n += 4)
             {
                 int col_idx = col + n;
-                if (col_idx < N)
-                    c[r * N + col_idx] = __float2half(reg[m][n]);
+                if (col_idx + 3 < N)
+                    LDST64BITS(c[r * N + col_idx]) = LDST64BITS(reg[m][n]);
             }
         }
     }
@@ -330,10 +330,10 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_optimized_kernel(half *a, half *b, ha
     __shared__ half s_a[BM][BK], s_b[BK][BN]; // 2*128*8*2=4KB
 
     // 每行八个数据 两个线程处理 一个线程读4个
-    int sam = tid / 2;           // 0-127, which row in A to load
+    int sam = tid / 2;                // 0-127, which row in A to load
     int sak = (tid % 2 == 0) ? 0 : 4; // 向量化访存, 0 or 4
-    int sbk = tid / 32;          // 0-7, which row in B to load
-    int sbn = (tid % 32) * 4;    // 0, 4, 8, ..., 124, which col in B to load
+    int sbk = tid / 32;               // 0-7, which row in B to load
+    int sbn = (tid % 32) * 4;         // 0, 4, 8, ..., 124, which col in B to load
 
     int gam = by * BM + sam;
     int gbn = bx * BN + sbn;
@@ -406,6 +406,20 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_optimized_kernel(half *a, half *b, ha
                 // 关键区别：不同的索引计算方式
                 // 原版本: ty * TM + m = ty * 8 + m (连续排列)
                 // 优化版: ty + m * 16 (交错排列，减少bank conflict)
+                /**
+                 *   "原版本没有严重bank conflict"的原因：
+
+  1. ✅ Half类型的自然对齐：每2个half占4字节，正好1个bank
+  2. ✅ 连续访问分散到不同bank：s_a[0], s_a[1], s_a[2], s_a[3] → bank 0,1,2,3
+  3. ✅ 轻度2-way冲突可接受：现代GPU硬件可以很好地处理
+  4. ✅ 空间局部性更重要：连续访问带来的性能提升远超过bank冲突的影响
+
+  真正的性能瓶颈：
+  - ❌ 不是bank conflict（只有2-way，很轻微）
+  - ✅ 是全局内存带宽和访问合并
+  - ✅ 是计算密度和指令级并行
+  - ✅ 是共享内存的重用效率
+                 */
                 int comp_smem_a_m = ty + m * 16;
                 float a_val = __half2float(s_a[comp_smem_a_m][p]);
 #pragma unroll
@@ -427,7 +441,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_optimized_kernel(half *a, half *b, ha
         // 关键区别：对应不同的索引计算
         // 原版本: r = row + m = by*128 + ty*8 + m
         // 优化版: r = by*128 + (ty + m*16) = by*128 + ty + m*16
-        int r = by * BM + ty + m * 16;  // 对应 ty + m * 16
+        int r = by * BM + ty + m * 16; // 对应 ty + m * 16
         if (r < M)
         {
 #pragma unroll
@@ -441,6 +455,156 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_optimized_kernel(half *a, half *b, ha
     }
 }
 
+template <const int BM = 128, const int BN = 128, const int BK = 8, const int TM = 8, const int TN = 8>
+__global__ void hgemm_t_8x8_sliced_k_f16x4_pack_kernel(half *a, half *b, half *c, int M, int N, int K)
+{
+    /**
+     * 这个版本主要用float4 load/store 同时引入了fma
+     * 完全仿照参考实现，使用float累加器减少精度损失
+     */
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int tid = threadIdx.y * blockDim.x + tx;  // tid within the block, 0-255
+    __shared__ half s_a[BM][BK], s_b[BK][BN]; // 2*128*8*2=4KB
+
+    // 每行八个数据 两个线程处理 一个线程读4个
+    int sam = tid / 2;                // 0-127, which row in A to load
+    int sak = (tid % 2 == 0) ? 0 : 4; // 向量化访存, 0 or 4
+    int sbk = tid / 32;               // 0-7, which row in B to load
+    int sbn = (tid % 32) * 4;         // 0, 4, 8, ..., 124, which col in B to load
+
+    int gam = by * BM + sam;
+    int gbn = bx * BN + sbn;
+
+    if (gam >= M || gbn >= N)
+        return;
+
+    // 使用float累加器来减少精度损失
+    float r_c[TM][TN] = {0.0f}; // 8x8
+
+    // K-loop
+    for (int k = 0; k < (K + BK - 1) / BK; ++k)
+    {
+        // 加载A分块: s_a[BM][BK]
+        int gak = k * BK + sak;
+        int a_addr = gam * K + gak;
+        LDST64BITS(s_a[sam][sak]) = LDST64BITS(a[a_addr]);
+
+        // 加载B分块: s_b[BK][BN]
+        int gbk = k * BK + sbk;
+        int b_addr = gbk * N + gbn;
+        LDST64BITS(s_b[sbk][sbn]) = LDST64BITS(b[b_addr]);
+
+        __syncthreads();
+
+        // 计算
+#pragma unroll
+        for (int k_tile = 0; k_tile < BK; k_tile++)
+        {
+#pragma unroll
+            for (int m = 0; m < TM; m++)
+            {
+                int comp_smem_a_m = ty * TM + m;
+                float a_val = __half2float(s_a[comp_smem_a_m][k_tile]);
+#pragma unroll
+                for (int n = 0; n < TN; n++)
+                {
+                    int comp_smem_b_n = tx * TN + n;
+                    r_c[m][n] += a_val * __half2float(s_b[k_tile][comp_smem_b_n]);
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    // 写回结果
+#pragma unroll
+    for (int m = 0; m < TM; ++m)
+    {
+        int r = by * BM + ty * TM + m;
+#pragma unroll
+        for (int n = 0; n < TN; n += 4)
+        {
+            int c_addr = r * N + (bx * BN + tx * TN + n);
+            // 将float结果转换为half并存储
+            half temp[4];
+            temp[0] = __float2half(r_c[m][n]);
+            temp[1] = __float2half(r_c[m][n + 1]);
+            temp[2] = __float2half(r_c[m][n + 2]);
+            temp[3] = __float2half(r_c[m][n + 3]);
+            LDST64BITS(c[c_addr]) = LDST64BITS(temp[0]);
+        }
+    }
+}
+
+template <const int BM = 128,
+          const int BN = 128,
+          const int BK = 8,
+          const int TM = 8,
+          const int TN = 8,
+          const int OFFSET = 0>
+__global__ void hgemm_t_8x8_sliced_k_f16x4_pack_bcf_kernel(half *a, half *b, half *c, const int M, const int N, const int K)
+{
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int tid = ty * blockDim.x + tx;
+
+    __shared__ half s_a[BK][BM + OFFSET]; // ！矩阵转置 从八路bank conflict 变为二路
+    __shared__ half s_b[BK][BN + OFFSET];
+
+    half r_load_a[TM / 2]; // 4 //为什么是TM/2? 不知道 但是手动一次读四个half 因为sa转置了不能想量化存储了
+    half r_load_b[TN / 2]; // 4
+    half r_comp_a[TM];
+    half r_comp_b[TN];
+    half r_c[TM][TN] = {__float2half(0.0f)};
+
+    int sam = tid / 2;            // 0,1,2,...,127
+    int sak = (tid & 2 - 1) << 2; // 0, 4
+    int sbk = tid / 32;
+    int sbn = (tid & 32 - 1) << 2; // 0, 4, 8, ..., 124
+    int gam = by * BM + sam;
+    int gbn = bx * BN + sbn;
+    if (gam >= M || gbn >= N)
+        return;
+    for (int bk = 0; bk < (K + BK - 1) / BK; bk++)
+    {
+        int gak = bk * BK + sak;
+        int a_addr = gam * K + gak;
+        int gbk = bk * BK + sbk;
+        int b_addr = gbk * N + bgn;
+        LDST64BITS(r_load_a[0]) = LDST64BITS(a[a_addr]);
+        LDST64BITS(r_load_b[0]) = LDST64BITS(b[b_arrr]);
+        // 转置后放置
+        s_a[sak][sam] = r_load_a[0];
+        s_a[sak + 1][sam] = r_load_a[1];
+        s_a[sak + 2][sam] = r_load_a[2];
+        s_a[sak + 3][sam] = r_load_a[3];
+        // b不需要
+        LDST64BITS(s_b[sbk][sbn]) = LDST64BITS(r_load_b[0]);
+        __syncthreads();
+#pragma unroll
+        for (int tk = 0; tk < BK; tk++)
+        {
+            LDST64BITS(r_comp_a[0]) = LDST64BITS(s_a[tk][ty * 4]);
+            LDST64BITS(r_comp_a[4]) = LDST64BITS(s_a[tk][ty * 4 + 16 * 4]); // 向量化访存 M方向 16个线程16个线程的走
+            LDST64BITS(r_comp_b[0]) = LDST64BITS(s_b[tk][tx * 4]);
+            LDST64BITS(r_comp_b[4]) = LDST64BITS(s_b[tk][tx * 4 + 16 * 4]);
+#pragma unroll
+            for (int tm = 0; tm < TM; tm++)
+#pragma
+                for (int tn = 0; tn < TN; tn++)
+                {
+                    r_c = [tm][tn] = __hfma(r_comp_a[tm], r_comp_b[tn], r_c[tm][tn]);
+                }
+        }
+        __syncthreads();
+    }
+    // 写回 省略
+}
 // 启动函数
 
 // Host wrapper function to launch the native kernel
@@ -521,3 +685,19 @@ void hgemm_t_8x8_sliced_k_f16x4_optimized(half *a, half *b, half *c, int M, int 
     cudaDeviceSynchronize();
 }
 
+// Host wrapper function to launch the t_8x8_sliced_k_f16x4_pack kernel
+void hgemm_t_8x8_sliced_k_f16x4_pack(half *a, half *b, half *c, int M, int N, int K)
+{
+    const int BM = 128;
+    const int BN = 128;
+    const int BK = 8;
+    const int TM = 8;
+    const int TN = 8;
+
+    // 16x16 = 256 threads (2D)
+    dim3 blockDim(16, 16);
+    dim3 gridDim((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+    hgemm_t_8x8_sliced_k_f16x4_pack_kernel<BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(a, b, c, M, N, K);
+    cudaDeviceSynchronize();
+}

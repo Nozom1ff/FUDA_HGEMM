@@ -9,6 +9,7 @@ extern void hgemm_sliced_k_fp16(half *a, half *b, half *c, int M, int N, int K);
 extern void hgemm_t_8x8_sliced_k(half *a, half *b, half *c, int M, int N, int K);
 extern void hgemm_t_8x8_sliced_k_f16x4(half *a, half *b, half *c, int M, int N, int K);
 extern void hgemm_t_8x8_sliced_k_f16x4_optimized(half *a, half *b, half *c, int M, int N, int K);
+extern void hgemm_t_8x8_sliced_k_f16x4_pack(half *a, half *b, half *c, int M, int N, int K);
 
 #include "../cuda/native/hgemm.cu"
 #include "../utils/test_utils.h"
@@ -90,19 +91,9 @@ int main()
     printf("Device: %s\n", prop.name);
     printf("Compute Capability: %d.%d\n\n", prop.major, prop.minor);
 
-    // 暂时注释掉之前的测试
-    // Test native FP16 kernel
-    // test_kernel("hgemm_native_fp16", hgemm_native_fp16);
-
-    // Test sliced K FP16 kernel
-    // test_kernel("hgemm_sliced_k_fp16", hgemm_sliced_k_fp16);
-
-    // Test t_8x8_sliced_k kernel
-    // test_kernel("hgemm_t_8x8_sliced_k", hgemm_t_8x8_sliced_k);
-
-    // Test new f16x4 kernels
-    test_kernel("hgemm_t_8x8_sliced_k_f16x4", hgemm_t_8x8_sliced_k_f16x4);
-    test_kernel("hgemm_t_8x8_sliced_k_f16x4_optimized", hgemm_t_8x8_sliced_k_f16x4_optimized);
+    // Test pack kernel
+    test_kernel("hgemm_t_8x8_sliced_k_f16x4_kernel", hgemm_t_8x8_sliced_k_f16x4_kernel);
+    test_kernel("hgemm_t_8x8_sliced_k_f16x4_pack", hgemm_t_8x8_sliced_k_f16x4_pack);
 
     printf("All tests completed!\n");
     print_separator();
