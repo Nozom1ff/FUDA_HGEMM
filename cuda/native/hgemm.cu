@@ -595,11 +595,13 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_pack_bcf_kernel(half *a, half *b, hal
             LDST64BITS(r_comp_b[4]) = LDST64BITS(s_b[tk][tx * 4 + 16 * 4]);
 #pragma unroll
             for (int tm = 0; tm < TM; tm++)
-#pragma
+            {
+#pragma unroll
                 for (int tn = 0; tn < TN; tn++)
                 {
                     r_c = [tm][tn] = __hfma(r_comp_a[tm], r_comp_b[tn], r_c[tm][tn]);
                 }
+            }
         }
         __syncthreads();
     }

@@ -24,6 +24,7 @@ include_directories(
     ${CUDA_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/utils
     ${CMAKE_CURRENT_SOURCE_DIR}/cuda/native
+    ${CMAKE_CURRENT_SOURCE_DIR}/cuda/wmma
 )
 
 # Compiler flags
@@ -50,9 +51,23 @@ set_target_properties(test_hgemm_native PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# WMMA kernel test
+add_executable(test_hgemm_wmma
+    cuda/wmma/wmma.cu
+)
+
+target_link_libraries(test_hgemm_wmma
+    ${CUDA_LIBRARIES}
+    ${CUDA_cublas_LIBRARY}
+)
+
+set_target_properties(test_hgemm_wmma PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # Utility target to build all tests
 add_custom_target(tests ALL
-    DEPENDS test_hgemm_native
+    DEPENDS test_hgemm_native test_hgemm_wmma
 )
 
 # Print build information
